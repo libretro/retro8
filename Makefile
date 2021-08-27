@@ -170,6 +170,22 @@ else ifeq ($(platform), retrofw)
    CFLAGS += -fno-unwind-tables -fno-asynchronous-unwind-tables 
    CFLAGS += -fmerge-all-constants -fno-math-errno -fno-stack-protector -fno-ident    
    CXXFLAGS := $(ASFLAGS) $(CFLAGS)
+else ifeq ($(platform), miyoo)
+   EXT ?= so
+   TARGET := $(TARGET_NAME)_libretro.$(EXT)
+   CC = /opt/miyoo/usr/bin/arm-linux-gcc
+   CXX = /opt/miyoo/usr/bin/arm-linux-g++
+   fpic := -fPIC
+   SHARED := -shared -Wl,--version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
+   LIBS += -lpthread
+   CFLAGS += -fomit-frame-pointer -ffast-math -march=armv5te -mtune=arm926ej-s
+   CFLAGS += -ffunction-sections -fdata-sections -flto 
+   CFLAGS += -falign-functions=1 -falign-jumps=1 -falign-loops=1
+   CFLAGS += -fomit-frame-pointer -ffast-math -fmerge-all-constants 
+   CFLAGS += -funsafe-math-optimizations -fsingle-precision-constant -fexpensive-optimizations
+   CFLAGS += -fno-unwind-tables -fno-asynchronous-unwind-tables 
+   CFLAGS += -fmerge-all-constants -fno-math-errno -fno-stack-protector -fno-ident    
+   CXXFLAGS := $(ASFLAGS) $(CFLAGS)
 else ifeq ($(platform), vita)
    TARGET := $(TARGET_NAME)_vita.a
    CC = arm-vita-eabi-gcc
@@ -190,6 +206,9 @@ ifeq ($(DEBUG), 1)
 else ifeq ($(platform), retrofw)
 	CFLAGS += -Ofast
 	CXXFLAGS += -Ofast
+else ifeq ($(platform), miyoo)
+   CFLAGS += -Ofast
+   CXXFLAGS += -Ofast
 else
    CFLAGS += -O3
    CXXFLAGS += -O3
