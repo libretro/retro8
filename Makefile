@@ -187,8 +187,10 @@ else ifeq ($(platform), wiiu)
 	CC = $(DEVKITPPC)/bin/powerpc-eabi-gcc$(EXE_EXT)
 	CXX = $(DEVKITPPC)/bin/powerpc-eabi-g++$(EXE_EXT)
 	AR = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
-	CFLAGS += -DGEKKO -DWIIU -DHW_RVL -mwup -mcpu=750 -meabi -mhard-float
-	CXXFLAGS += -DGEKKO -DWIIU -DHW_RVL -mwup -mcpu=750 -meabi -mhard-float
+	CFLAGS += -DGEKKO -DWIIU -DHW_RVL -mcpu=750 -meabi -mhard-float
+        CFLAGS += -ffunction-sections -fdata-sections -D__wiiu__ -D__wut__ -DHW_WUP
+	CXXFLAGS += -DGEKKO -DWIIU -DHW_RVL -mcpu=750 -meabi -mhard-float
+	CXXFLAGS += -ffunction-sections -fdata-sections -D__wiiu__ -D__wut__ -DHW_WUP
 	HAVE_RZLIB := 1
 	STATIC_LINKING=1
 else ifeq ($(platform), retrofw)
