@@ -1,12 +1,7 @@
 *.o
-*.dll
+*.d
 *.so
 *.so.*
+*.dll
 *.dylib
-projects/vs2017/libs/**
-projects/opendingux/**
-projects/funkey/**
-**/.vs/**
-**/Debug/**
-**/Release/**
-.DS_Store
+tools/out/

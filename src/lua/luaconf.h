@@ -144,7 +144,7 @@
 #endif
 
 #if !defined(LUA_FLOAT_TYPE)
-#define LUA_FLOAT_TYPE	LUA_FLOAT_FLOAT
+#define LUA_FLOAT_TYPE	LUA_FLOAT_DOUBLE  /* holds every PICO-8 16.16 value exactly */
 #endif
 
 /* }================================================================== */

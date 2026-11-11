@@ -10,6 +10,7 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <math.h>
 
 
 #include "lua.h"
@@ -259,14 +260,58 @@ typedef unsigned long Instruction;
 ** The luai_num* macros define the primitive operations over numbers.
 */
 
+/*
+** PICO-8 numbers are signed 16.16 fixed point. Every arithmetic result keeps 16 fraction bits, rounded down, and wraps
+** into -32768..32767.99998, so 32767 + 1 is -32768 and 256 * 256 is 0.
+*/
+static inline double p8_wrap (double x) {
+  return x - 65536.0 * l_mathop(floor)((x + 32768.0) / 65536.0);
+}
+
+static inline double p8_fix (double x) {
+  const double bits = l_mathop(floor)(x * 65536.0);
+  if (bits >= -2147483648.0 && bits < 2147483648.0)
+    return bits * (1.0 / 65536.0);
+  return p8_wrap(bits * (1.0 / 65536.0));
+}
+
+static inline long long p8_bits (double x) {
+  return (long long)l_mathop(floor)(p8_wrap(x) * 65536.0);
+}
+
+static inline double p8_mul (double a, double b) {
+  const long long product = p8_bits(a) * p8_bits(b);
+  return p8_wrap((double)(product >> 16) / 65536.0);
+}
+
+/* a division by zero gives the largest number of the matching sign, otherwise the quotient is cut towards zero */
+static inline double p8_div (double a, double b) {
+  const long long ia = p8_bits(a), ib = p8_bits(b);
+  if (ib == 0)
+    return ia < 0 ? -32767.9999847412109375 : 32767.9999847412109375;
+  return p8_wrap((double)((ia * 65536) / ib) / 65536.0);
+}
+
+static inline double p8_idiv (double a, double b) {
+  const long long ia = p8_bits(a), ib = p8_bits(b);
+  if (ib == 0)
+    return ia < 0 ? -32768.0 : 32767.0;
+  long long q = ia / ib;
+  if ((ia % ib != 0) && ((ia < 0) != (ib < 0)))
+    --q;
+  return p8_wrap((double)q);
+}
+
+#define p8_iwrap(i)             ((lua_Integer)(short)(i))
+
 /* floor division (defined as 'floor(a/b)') */
 #if !defined(luai_numidiv)
-#define luai_numidiv(L,a,b)     ((void)L, l_floor(luai_numdiv(L,a,b)))
+#define luai_numidiv(L,a,b)     ((void)L, p8_idiv(a,b))
 #endif
 
 /* float division */
 #if !defined(luai_numdiv)
-#define luai_numdiv(L,a,b)      ((a)/(b))
+#define luai_numdiv(L,a,b)      ((void)L, p8_div(a,b))
 #endif
 
 /*
@@ -278,20 +323,20 @@ typedef unsigned long Instruction;
 */
 #if !defined(luai_nummod)
 #define luai_nummod(L,a,b,m)  \
-  { (m) = l_mathop(fmod)(a,b); if ((m)*(b) < 0) (m) += (b); }
+  { (m) = l_mathop(fmod)(a,b); if ((m)*(b) < 0) (m) += (b); (m) = p8_fix(m); }
 #endif
 
 /* exponentiation */
 #if !defined(luai_numpow)
-#define luai_numpow(L,a,b)      ((void)L, l_mathop(pow)(a,b))
+#define luai_numpow(L,a,b)      ((void)L, p8_fix(l_mathop(pow)(a,b)))
 #endif
 
 /* the others are quite standard operations */
 #if !defined(luai_numadd)
-#define luai_numadd(L,a,b)      ((a)+(b))
-#define luai_numsub(L,a,b)      ((a)-(b))
-#define luai_nummul(L,a,b)      ((a)*(b))
-#define luai_numunm(L,a)        (-(a))
+#define luai_numadd(L,a,b)      p8_fix((a)+(b))
+#define luai_numsub(L,a,b)      p8_fix((a)-(b))
+#define luai_nummul(L,a,b)      p8_mul(a,b)
+#define luai_numunm(L,a)        p8_wrap(-(a))
 #define luai_numeq(a,b)         ((a)==(b))
 #define luai_numlt(a,b)         ((a)<(b))
 #define luai_numle(a,b)         ((a)<=(b))

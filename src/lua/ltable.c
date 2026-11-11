@@ -592,6 +592,14 @@ const TValue *luaH_get (Table *t, const TValue *key) {
     case LUA_TNUMINT: return luaH_getint(t, ivalue(key));
     case LUA_TNIL: return luaO_nilobject;
     case LUA_TNUMFLT: {
+      /* PICO-8 numbers are all floats, so whole float keys take the integer path without a floor() */
+      const lua_Number n = fltvalue(key);
+      if (n >= -2147483648.0 && n < 2147483648.0) {
+        const lua_Integer k = (lua_Integer)n;
+        if ((lua_Number)k == n)
+          return luaH_getint(t, k);
+        return getgeneric(t, key);
+      }
       lua_Integer k;
       if (luaV_tointeger(key, &k, 0)) /* index is int? */
         return luaH_getint(t, k);  /* use specialized version */

@@ -253,8 +253,8 @@ int decodePNG(std::vector<unsigned char>& out_image, unsigned long& image_width,
   {
     struct Info
     {
-      unsigned long width, height, colorType, bitDepth, compressionMethod, filterMethod, interlaceMethod, key_r, key_g, key_b;
-      bool key_defined; //is a transparent color key given?
+      unsigned long width = 0, height = 0, colorType = 0, bitDepth = 0, compressionMethod = 0, filterMethod = 0, interlaceMethod = 0, key_r = 0, key_g = 0, key_b = 0;
+      bool key_defined = false; //is a transparent color key given?
       std::vector<unsigned char> palette;
     } info;
     int error;
@@ -265,7 +265,7 @@ int decodePNG(std::vector<unsigned char>& out_image, unsigned long& image_width,
       readPngHeader(&in[0], size); if (error) return;
       size_t pos = 33; //first byte of the first chunk after the header
       std::vector<unsigned char> idat; //the data from idat chunks
-      bool IEND = false, known_type = true;
+      bool IEND = false;
       info.key_defined = false;
       while (!IEND) //loop through the chunks, ignoring unknown chunks and stopping at IEND chunk. IDAT data is put at the start of the in buffer
       {
@@ -317,7 +317,6 @@ int decodePNG(std::vector<unsigned char>& out_image, unsigned long& image_width,
         {
           if (!(in[pos + 0] & 32)) { error = 69; return; } //error: unknown critical chunk (5th bit of first byte of chunk type is 0)
           pos += (chunkLength + 4); //skip 4 letters and uninterpreted data of unimplemented chunk
-          known_type = false;
         }
         pos += 4; //step over CRC (which is ignored)
       }

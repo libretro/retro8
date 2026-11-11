@@ -11,6 +11,7 @@
 
 
 #include <locale.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "lua.h"
@@ -42,14 +43,21 @@ static const char *const luaX_tokens [] = {
     "end", "false", "for", "function", "goto", "if",
     "in", "local", "nil", "not", "or", "repeat",
     "return", "then", "true", "until", "while",
-    "//", "..", "...", "==", ">=", "<=", "~=", "!=",
-    "+=", "-=", "*=", "/=",
-    "<<", ">>", "::", "<eof>", "<eol>"
+    "\\", "..", "...", "==", ">=", "<=", "~=", "!=",
+    "+=", "-=", "*=", "/=", "%=",
+    "\\=", "..=", "^=", "&=", "|=", "^^=",
+    "<<=", ">>=", ">>>=",
+    "<<", ">>", ">>>", "<<>", ">><",
+    "::", "<eof>", "<eol>",
     "<number>", "<integer>", "<name>", "<string>"
 };
 
 
 #define save_and_next(ls) (save(ls, ls->current), next(ls))
+
+/* PICO-8 allows glyphs (bytes 0x80 and above) in identifiers */
+#define p8_isalpha(c)	(lislalpha(c) || ((c) >= 0x80 && (c) <= 0xff))
+#define p8_isalnum(c)	(lislalnum(c) || ((c) >= 0x80 && (c) <= 0xff))
 
 
 static l_noret lexerror (LexState *ls, const char *msg, int token);
@@ -213,18 +221,48 @@ static int check_next2 (LexState *ls, const char *set) {
 ** this function is quite liberal in what it accepts, as 'luaO_str2num'
 ** will reject ill-formed numerals.
 */
+static int read_binary (LexState *ls, SemInfo *seminfo) {
+  lua_Number value = 0;
+  lua_Number scale = 1;
+  int fraction = 0;
+  for (;;) {
+    if (ls->current == '0' || ls->current == '1') {
+      if (fraction) {
+        scale /= 2;
+        value += (ls->current - '0') * scale;
+      }
+      else
+        value = value * 2 + (ls->current - '0');
+      next(ls);
+    }
+    else if (ls->current == '.' && !fraction) {
+      fraction = 1;
+      next(ls);
+    }
+    else break;
+  }
+  if (value >= 32768.0)
+    value -= 65536.0 * l_mathop(floor)((value + 32768.0) / 65536.0);
+  if (!fraction || value == l_floor(value)) {
+    seminfo->i = (lua_Integer)value;
+    return TK_INT;
+  }
+  seminfo->r = value;
+  return TK_FLT;
+}
+
 static int read_numeral (LexState *ls, SemInfo *seminfo) {
   TValue obj;
-  const char *expo = "Ee";
+  int hex = 0;
   int first = ls->current;
   lua_assert(lisdigit(ls->current));
   save_and_next(ls);
+  if (first == '0' && check_next2(ls, "bB"))  /* binary? */
+    return read_binary(ls, seminfo);
   if (first == '0' && check_next2(ls, "xX"))  /* hexadecimal? */
-    expo = "Pp";
+    hex = 1;
   for (;;) {
-    if (check_next2(ls, expo))  /* exponent part? */
-      check_next2(ls, "-+");  /* optional exponent sign */
-    if (lisxdigit(ls->current))
+    if (hex ? lisxdigit(ls->current) : lisdigit(ls->current))
       save_and_next(ls);
     else if (ls->current == '.')
       save_and_next(ls);
@@ -233,13 +271,21 @@ static int read_numeral (LexState *ls, SemInfo *seminfo) {
   save(ls, '\0');
   if (luaO_str2num(luaZ_buffer(ls->buff), &obj) == 0)  /* format error? */
     lexerror(ls, "malformed number", TK_FLT);
+  /* PICO-8 numbers are signed 16.16, so 0xffff is -1 and 0x8000 is -32768 */
   if (ttisinteger(&obj)) {
-    seminfo->i = ivalue(&obj);
+    lua_Integer v = ivalue(&obj);
+    if (v < -32768 || v > 32767)
+      v = (lua_Integer)((int16_t)(uint16_t)(v & 0xffff));
+    seminfo->i = v;
     return TK_INT;
   }
   else {
     lua_assert(ttisfloat(&obj));
-    seminfo->r = fltvalue(&obj);
+    /* the fraction rounds to the nearest 1/65536, so 0.1 is 0x0.199a */
+    lua_Number v = l_mathop(floor)(fltvalue(&obj) * 65536.0 + 0.5) / 65536.0;
+    if (v >= 32768.0 || v < -32768.0)
+      v -= 65536.0 * l_mathop(floor)((v + 32768.0) / 65536.0);
+    seminfo->r = v;
     return TK_FLT;
   }
 }
@@ -271,6 +317,8 @@ static void read_long_string (LexState *ls, SemInfo *seminfo, int sep) {
     switch (ls->current) {
       case EOZ: {  /* error */
         const char *what = (seminfo ? "string" : "comment");
+        if (!seminfo)  /* PICO-8 lets a long comment run to the end of the code */
+          return;
         const char *msg = luaO_pushfstring(ls->L,
                      "unfinished long %s (starting at line %d)", what, line);
         lexerror(ls, msg, TK_EOS);
@@ -386,6 +434,12 @@ static void read_string (LexState *ls, int del, SemInfo *seminfo) {
           case 'r': c = '\r'; goto read_save;
           case 't': c = '\t'; goto read_save;
           case 'v': c = '\v'; goto read_save;
+          case '*': c = 1; goto read_save;  /* PICO-8 P8SCII control codes */
+          case '#': c = 2; goto read_save;
+          case '-': c = 3; goto read_save;
+          case '|': c = 4; goto read_save;
+          case '+': c = 5; goto read_save;
+          case '^': c = 6; goto read_save;
           case 'x': c = readhexaesc(ls); goto read_save;
           case 'u': utf8esc(ls);  goto no_save;
           case '\n': case '\r':
@@ -482,20 +536,60 @@ static int llex (LexState *ls, SemInfo *seminfo) {
       case '<': {
         next(ls);
         if (check_next1(ls, '=')) return TK_LE;
-        else if (check_next1(ls, '<')) return TK_SHL;
+        else if (check_next1(ls, '<')) {
+          if (check_next1(ls, '=')) return TK_ASSSHL;
+          else if (check_next1(ls, '>')) return TK_ROTL;
+          return TK_SHL;
+        }
         else return '<';
       }
       case '>': {
         next(ls);
         if (check_next1(ls, '=')) return TK_GE;
-        else if (check_next1(ls, '>')) return TK_SHR;
+        else if (check_next1(ls, '>')) {
+          if (check_next1(ls, '>')) {
+            if (check_next1(ls, '=')) return TK_ASSLSHR;
+            return TK_LSHR;
+          }
+          else if (check_next1(ls, '=')) return TK_ASSSHR;
+          else if (check_next1(ls, '<')) return TK_ROTR;
+          return TK_SHR;
+        }
         else return '>';
       }
       case '/': {
         next(ls);
-        if (check_next1(ls, '/')) return TK_IDIV;
+        if (check_next1(ls, '/')) {  /* PICO-8 '//' comment */
+          while (!currIsNewline(ls) && ls->current != EOZ)
+            next(ls);
+          break;
+        }
         else if (check_next1(ls, '=')) return TK_ASSDIV;
         else return '/';
+      }
+      case '\\': {  /* PICO-8 integer division */
+        next(ls);
+        if (check_next1(ls, '=')) return TK_ASSIDIV;
+        else return TK_IDIV;
+      }
+      case '^': {
+        next(ls);
+        if (check_next1(ls, '^')) {  /* PICO-8 '^^' xor */
+          if (check_next1(ls, '=')) return TK_ASSBXOR;
+          return '~';
+        }
+        else if (check_next1(ls, '=')) return TK_ASSPOW;
+        else return '^';
+      }
+      case '&': {
+        next(ls);
+        if (check_next1(ls, '=')) return TK_ASSBAND;
+        else return '&';
+      }
+      case '|': {
+        next(ls);
+        if (check_next1(ls, '=')) return TK_ASSBOR;
+        else return '|';
       }
       case '~': {
         next(ls);
@@ -504,8 +598,8 @@ static int llex (LexState *ls, SemInfo *seminfo) {
       }
       case '!': {
         next(ls);
-        next(ls);
-        return TK_NE2;
+        if (check_next1(ls, '=')) return TK_NE2;
+        else return '!';
       }
       case '+': {
         next(ls);
@@ -537,6 +631,8 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         if (check_next1(ls, '.')) {
           if (check_next1(ls, '.'))
             return TK_DOTS;   /* '...' */
+          else if (check_next1(ls, '='))
+            return TK_ASSCONCAT;   /* '..=' */
           else return TK_CONCAT;   /* '..' */
         }
         else if (!lisdigit(ls->current)) return '.';
@@ -546,89 +642,9 @@ static int llex (LexState *ls, SemInfo *seminfo) {
       case '5': case '6': case '7': case '8': case '9': {
         return read_numeral(ls, seminfo);
       }
-      /* special glyphs */
-      case 0xE2:
-      case 0xF0:
-      {
-
-        static char down_arrow[]  = { 0xe2, 0xac, 0x87, 0xef, 0xb8, 0x8f };
-        static char up_arrow[]    = { 0xe2, 0xac, 0x86, 0xef, 0xb8, 0x8f };
-        static char left_arrow[]  = { 0xe2, 0xac, 0x85, 0xef, 0xb8, 0x8f };
-        static char right_arrow[] = { 0xe2, 0x9e, 0xa1, 0xef, 0xb8, 0x8f };
-        static char x_button[]    = { 0xe2, 0x9d, 0x8e };
-        static char o_button[] = { 0xf0, 0x9f, 0x85, 0xbe, 0xef, 0xb8, 0x8f };
-
-        static size_t lengths[] = { 6, 6, 6, 6, 3, 7 };
-        static const char* keys[] = { down_arrow, up_arrow, left_arrow, right_arrow, x_button, o_button };
-        static const int value[] = { 3, 2, 0, 1,5, 4 };
-
-        int anyValid = 1;
-
-        do
-        {
-          save_and_next(ls);
-
-          anyValid = 0;
-          int i;
-          for (i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
-          {
-            if (memcmp(ls->buff->buffer, keys[i], ls->buff->n) == 0)
-            {
-              if (ls->buff->n == lengths[i])
-              {
-                seminfo->i = value[i];
-                return TK_INT;
-              }
-              else
-                anyValid = 1;
-            }
-          }
-        } while (anyValid);
-
-      }
-      case 0x8B:
-      {
+      case '?': {  /* PICO-8 print shorthand, handled by the parser */
         next(ls);
-        seminfo->i = 0;
-        return TK_INT;
-      }
-      case 0x91:
-      {
-        next(ls);
-        seminfo->i = 1;
-        return TK_INT;
-      }
-      case 0x94:
-      {
-        next(ls);
-        seminfo->i = 2;
-        return TK_INT;
-      }
-      case 0x83:
-      {
-        next(ls);
-        seminfo->i = 3;
-        return TK_INT;
-      }
-      case 0x8e:
-      {
-        next(ls);
-        seminfo->i = 4;
-        return TK_INT;
-      }
-      case 0x97:
-      {
-        next(ls);
-        seminfo->i = 5;
-        return TK_INT;
-      }
-
-      case '?':
-      {
-        //TODO FIXME: print with ? consume the whole line for now, so it's not executed
-        while (!check_next1(ls, '\n'))
-          next(ls);
-        continue;
+        return '?';
       }
 
 
@@ -636,11 +652,11 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         return TK_EOS;
       }
       default: {
-        if (lislalpha(ls->current)) {  /* identifier or reserved word? */
+        if (p8_isalpha(ls->current)) {  /* identifier, reserved word or glyph? */
           TString *ts;
           do {
             save_and_next(ls);
-          } while (lislalnum(ls->current));
+          } while (p8_isalnum(ls->current));
           ts = luaX_newstring(ls, luaZ_buffer(ls->buff),
                                   luaZ_bufflen(ls->buff));
           seminfo->ts = ts;

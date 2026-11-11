@@ -551,8 +551,8 @@ void luaV_objlen (lua_State *L, StkId ra, const TValue *rb) {
 */
 lua_Integer luaV_div (lua_State *L, lua_Integer m, lua_Integer n) {
   if (l_castS2U(n) + 1u <= 1u) {  /* special cases: -1 or 0 */
-    if (n == 0)
-      luaG_runerror(L, "attempt to divide by zero");
+    if (n == 0)  /* PICO-8 saturates instead of raising an error */
+      return m < 0 ? -32768 : 32767;
     return intop(-, 0, m);   /* n==-1; avoid overflow with 0x80000...//-1 */
   }
   else {
@@ -571,9 +571,7 @@ lua_Integer luaV_div (lua_State *L, lua_Integer m, lua_Integer n) {
 */
 lua_Integer luaV_mod (lua_State *L, lua_Integer m, lua_Integer n) {
   if (l_castS2U(n) + 1u <= 1u) {  /* special cases: -1 or 0 */
-    if (n == 0)
-      luaG_runerror(L, "attempt to perform 'n%%0'");
-    return 0;   /* m % -1 == 0; avoid overflow with 0x80000...%-1 */
+    return 0;   /* PICO-8 'm % 0' is 0; m % -1 == 0 */
   }
   else {
     lua_Integer r = m % n;
@@ -783,6 +781,38 @@ void luaV_finishOp (lua_State *L) {
 
 
 
+/*
+** PICO-8 keeps its own API reachable when a cart swaps _ENV for a table of its
+** own. A name that misses through a variable called _ENV falls back to the API
+** functions saved at start up, which live in the registry under P8_API_KEY.
+*/
+#define P8_API_KEY "retro8.api"
+
+static int p8_isglobals (lua_State *L, const TValue *t) {
+  const TValue *g = luaH_getint(hvalue(&G(L)->l_registry), LUA_RIDX_GLOBALS);
+  return ttistable(g) && hvalue(g) == hvalue(t);
+}
+
+static void p8_apifallback (lua_State *L, LClosure *cl, CallInfo *ci,
+                            Instruction i, int isup, StkId ra, const TValue *key) {
+  const TValue *api = luaH_getstr(hvalue(&G(L)->l_registry),
+                                  luaS_newliteral(L, P8_API_KEY));
+  const TValue *fn;
+  const char *name;
+  if (!ttistable(api)) return;
+  fn = luaH_getstr(hvalue(api), tsvalue(key));
+  if (ttisnil(fn)) return;
+  if (isup) {
+    TString *n = cl->p->upvalues[GETARG_B(i)].name;
+    name = n ? getstr(n) : NULL;
+  }
+  else
+    name = luaF_getlocalname(cl->p, GETARG_B(i) + 1,
+                             (int)(ci->u.l.savedpc - cl->p->code) - 1);
+  if (name && strcmp(name, "_ENV") == 0)
+    setobj2s(L, ra, fn);
+}
+
 void luaV_execute (lua_State *L) {
   CallInfo *ci = L->ci;
   LClosure *cl;
@@ -836,13 +866,18 @@ void luaV_execute (lua_State *L) {
       vmcase(OP_GETTABUP) {
         TValue *upval = cl->upvals[GETARG_B(i)]->v;
         TValue *rc = RKC(i);
+        const int custom = !ttistable(upval) || !p8_isglobals(L, upval);
         gettableProtected(L, upval, rc, ra);
+        if (custom && ttisnil(RA(i)) && ttisshrstring(rc))
+          p8_apifallback(L, cl, ci, i, 1, RA(i), rc);
         vmbreak;
       }
       vmcase(OP_GETTABLE) {
         StkId rb = RB(i);
         TValue *rc = RKC(i);
         gettableProtected(L, rb, rc, ra);
+        if (ttisnil(RA(i)) && ttisshrstring(rc))
+          p8_apifallback(L, cl, ci, i, 0, RA(i), rc);
         vmbreak;
       }
       vmcase(OP_SETTABUP) {
@@ -892,7 +927,7 @@ void luaV_execute (lua_State *L) {
         lua_Number nb; lua_Number nc;
         if (ttisinteger(rb) && ttisinteger(rc)) {
           lua_Integer ib = ivalue(rb); lua_Integer ic = ivalue(rc);
-          setivalue(ra, intop(+, ib, ic));
+          setivalue(ra, p8_iwrap(intop(+, ib, ic)));
         }
         else if (tonumber(rb, &nb) && tonumber(rc, &nc)) {
           setfltvalue(ra, luai_numadd(L, nb, nc));
@@ -906,7 +941,7 @@ void luaV_execute (lua_State *L) {
         lua_Number nb; lua_Number nc;
         if (ttisinteger(rb) && ttisinteger(rc)) {
           lua_Integer ib = ivalue(rb); lua_Integer ic = ivalue(rc);
-          setivalue(ra, intop(-, ib, ic));
+          setivalue(ra, p8_iwrap(intop(-, ib, ic)));
         }
         else if (tonumber(rb, &nb) && tonumber(rc, &nc)) {
           setfltvalue(ra, luai_numsub(L, nb, nc));
@@ -920,7 +955,7 @@ void luaV_execute (lua_State *L) {
         lua_Number nb; lua_Number nc;
         if (ttisinteger(rb) && ttisinteger(rc)) {
           lua_Integer ib = ivalue(rb); lua_Integer ic = ivalue(rc);
-          setivalue(ra, intop(*, ib, ic));
+          setivalue(ra, p8_iwrap(intop(*, ib, ic)));
         }
         else if (tonumber(rb, &nb) && tonumber(rc, &nc)) {
           setfltvalue(ra, luai_nummul(L, nb, nc));
@@ -941,9 +976,7 @@ void luaV_execute (lua_State *L) {
       vmcase(OP_BAND) {
         TValue *rb = RKB(i);
         TValue *rc = RKC(i);
-        lua_Integer ib; lua_Integer ic;
-        if (tointeger(rb, &ib) && tointeger(rc, &ic)) {
-          setivalue(ra, intop(&, ib, ic));
+        if (luaO_p8bitwise(LUA_OPBAND, rb, rc, ra)) {
         }
         else { Protect(luaT_trybinTM(L, rb, rc, ra, TM_BAND)); }
         vmbreak;
@@ -951,9 +984,7 @@ void luaV_execute (lua_State *L) {
       vmcase(OP_BOR) {
         TValue *rb = RKB(i);
         TValue *rc = RKC(i);
-        lua_Integer ib; lua_Integer ic;
-        if (tointeger(rb, &ib) && tointeger(rc, &ic)) {
-          setivalue(ra, intop(|, ib, ic));
+        if (luaO_p8bitwise(LUA_OPBOR, rb, rc, ra)) {
         }
         else { Protect(luaT_trybinTM(L, rb, rc, ra, TM_BOR)); }
         vmbreak;
@@ -961,9 +992,7 @@ void luaV_execute (lua_State *L) {
       vmcase(OP_BXOR) {
         TValue *rb = RKB(i);
         TValue *rc = RKC(i);
-        lua_Integer ib; lua_Integer ic;
-        if (tointeger(rb, &ib) && tointeger(rc, &ic)) {
-          setivalue(ra, intop(^, ib, ic));
+        if (luaO_p8bitwise(LUA_OPBXOR, rb, rc, ra)) {
         }
         else { Protect(luaT_trybinTM(L, rb, rc, ra, TM_BXOR)); }
         vmbreak;
@@ -971,9 +1000,7 @@ void luaV_execute (lua_State *L) {
       vmcase(OP_SHL) {
         TValue *rb = RKB(i);
         TValue *rc = RKC(i);
-        lua_Integer ib; lua_Integer ic;
-        if (tointeger(rb, &ib) && tointeger(rc, &ic)) {
-          setivalue(ra, luaV_shiftl(ib, ic));
+        if (luaO_p8bitwise(LUA_OPSHL, rb, rc, ra)) {
         }
         else { Protect(luaT_trybinTM(L, rb, rc, ra, TM_SHL)); }
         vmbreak;
@@ -981,9 +1008,7 @@ void luaV_execute (lua_State *L) {
       vmcase(OP_SHR) {
         TValue *rb = RKB(i);
         TValue *rc = RKC(i);
-        lua_Integer ib; lua_Integer ic;
-        if (tointeger(rb, &ib) && tointeger(rc, &ic)) {
-          setivalue(ra, luaV_shiftl(ib, -ic));
+        if (luaO_p8bitwise(LUA_OPSHR, rb, rc, ra)) {
         }
         else { Protect(luaT_trybinTM(L, rb, rc, ra, TM_SHR)); }
         vmbreak;
@@ -1033,7 +1058,7 @@ void luaV_execute (lua_State *L) {
         lua_Number nb;
         if (ttisinteger(rb)) {
           lua_Integer ib = ivalue(rb);
-          setivalue(ra, intop(-, 0, ib));
+          setivalue(ra, p8_iwrap(intop(-, 0, ib)));
         }
         else if (tonumber(rb, &nb)) {
           setfltvalue(ra, luai_numunm(L, nb));
@@ -1045,9 +1070,7 @@ void luaV_execute (lua_State *L) {
       }
       vmcase(OP_BNOT) {
         TValue *rb = RB(i);
-        lua_Integer ib;
-        if (tointeger(rb, &ib)) {
-          setivalue(ra, intop(^, ~l_castS2U(0), ib));
+        if (luaO_p8bitwise(LUA_OPBNOT, rb, rb, ra)) {
         }
         else {
           Protect(luaT_trybinTM(L, rb, rb, ra, TM_BNOT));
@@ -1200,7 +1223,7 @@ void luaV_execute (lua_State *L) {
         }
         else {  /* floating loop */
           lua_Number step = fltvalue(ra + 2);
-          lua_Number idx = luai_numadd(L, fltvalue(ra), step); /* inc. index */
+          lua_Number idx = fltvalue(ra) + step; /* inc. index, unwrapped so a loop up to 32767 ends */
           lua_Number limit = fltvalue(ra + 1);
           if (luai_numlt(0, step) ? luai_numle(idx, limit)
                                   : luai_numle(limit, idx)) {
@@ -1217,6 +1240,9 @@ void luaV_execute (lua_State *L) {
         TValue *pstep = ra + 2;
         lua_Integer ilimit;
         int stopnow;
+        /* PICO-8 runs a loop with a nil start or limit as if it were 0 */
+        if (ttisnil(init)) setivalue(init, 0);
+        if (ttisnil(plimit)) setivalue(plimit, 0);
         if (ttisinteger(init) && ttisinteger(pstep) &&
             forlimit(plimit, &ilimit, ivalue(pstep), &stopnow)) {
           /* all values are integer */
@@ -1234,7 +1260,7 @@ void luaV_execute (lua_State *L) {
           setfltvalue(pstep, nstep);
           if (!tonumber(init, &ninit))
             luaG_runerror(L, "'for' initial value must be a number");
-          setfltvalue(init, luai_numsub(L, ninit, nstep));
+          setfltvalue(init, ninit - nstep);
         }
         ci->u.l.savedpc += GETARG_sBx(i);
         vmbreak;
