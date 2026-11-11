@@ -4,6 +4,7 @@
 
 #include <vector>
 #include <string>
+#include <sstream>
 
 namespace retro8
 {
@@ -19,11 +20,14 @@ namespace retro8
       uint8_t valueForUint8(const char* c);
 
       template<typename T> std::vector<std::string> loadLines(T& stream);
-      void load(const std::vector<std::string>& lines, Machine& dest);
+      bool load(const std::vector<std::string>& lines, Machine& dest);
+      void include(std::string name, std::stringstream& code, int depth);
 
     public:
+      /* skip the code, for reading another cart's data */
+      bool dataOnly = false;
 
-      void loadRaw(const std::string& data, Machine& dest);
+      bool loadRaw(const std::string& data, Machine& dest);
       void loadFile(const std::string& path, Machine& dest);
 
       static bool isPngCartridge(const std::string& path);

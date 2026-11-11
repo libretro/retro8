@@ -33,6 +33,7 @@ typedef enum BinOpr {
   OPR_EQ, OPR_LT, OPR_LE,
   OPR_NE, OPR_GT, OPR_GE,
   OPR_AND, OPR_OR,
+  OPR_LSHR, OPR_ROTL, OPR_ROTR,  /* PICO-8 operators compiled as calls */
   OPR_NOBINOPR
 } BinOpr;
 

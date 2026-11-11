@@ -40,14 +40,22 @@ class PXADecoder
 {
 public:
   const uint8_t* data;
+  size_t length;
   size_t b; /* bit index */
   size_t o; /* byte index */
   size_t expected;
+  bool failed;
   std::array<uint8_t, 256> m;
 
 private:
   bool readBit()
   {
+    if (o >= length)
+    {
+      failed = true;
+      return false;
+    }
+
     int v = data[o] & (1 << b);
     ++b;
 
@@ -79,7 +87,7 @@ private:
   }
 
 public:
-  PXADecoder(const uint8_t* data, size_t expected) : data(data), b(0), o(0), expected(expected)
+  PXADecoder(const uint8_t* data, size_t length, size_t expected) : data(data), length(length), b(0), o(0), expected(expected), failed(false)
   {
     /* initalize mapping, each value to itself */
     //TODO
@@ -90,7 +98,7 @@ public:
   std::string process()
   {
     std::string code;
-    while (code.size() < expected)
+    while (code.size() < expected && !failed)
     {
       bool h = readBit();
 
@@ -126,7 +134,7 @@ public:
         if (offsetBits == 10 && offset == 1)
         {
           uint8_t v = readBits(8);
-          while (v)
+          while (v && !failed)
           {
             code += v;
             v = readBits(8);
@@ -140,9 +148,14 @@ public:
           {
             part = readBits(3);
             length += part;
-          } while (part == 0b111);
+          } while (part == 0b111 && !failed);
 
-          assert(offset <= code.size());
+          /* a damaged image refers back before the start of the code */
+          if (offset > code.size())
+          {
+            failed = true;
+            break;
+          }
 
           size_t start = code.size() - offset;
           for (int32_t l = 0; l < length; ++l)
@@ -160,7 +173,7 @@ public:
 };
 
 
-void Stegano::load20(const PngData& data, Machine& m)
+bool Stegano::load20(const PngData& data, Machine& m)
 {
   auto* d = data.data;
   size_t o = RAW_DATA_LENGTH + MAGIC_LENGTH;
@@ -169,19 +182,19 @@ void Stegano::load20(const PngData& data, Machine& m)
   size_t compressedLength = assembleByte(d[o+2]) << 8 | assembleByte(d[o+3]);
   o += 4;
 
+  if (compressedLength < HEADER_20_LENGTH)
+    return false;
   compressedLength -= HEADER_20_LENGTH; /* subtract header length */
 
-  compressedLength = std::min(size_t(32769ULL - RAW_DATA_LENGTH), compressedLength);
-
-  assert(o == RAW_DATA_LENGTH + HEADER_20_LENGTH);
+  compressedLength = std::min(data.length - o, compressedLength);
 
   std::vector<uint8_t> assembled(compressedLength);
   std::generate(assembled.begin(), assembled.end(), [this, &d, &o] () { return assembleByte(d[o++]); });
 
-  assert(o == RAW_DATA_LENGTH + HEADER_20_LENGTH + compressedLength);
-
-  auto decoder = PXADecoder(assembled.data(), decompressedLength);
+  auto decoder = PXADecoder(assembled.data(), assembled.size(), decompressedLength);
   std::string code = decoder.process();
+  if (decoder.failed)
+    return false;
 
 #if DEBUGGER
   std::ofstream output(fileName);
@@ -189,10 +202,10 @@ void Stegano::load20(const PngData& data, Machine& m)
   output.close();
 #endif
 
-  m.code().initFromSource(code);
+  return m.code().initFromSource(code);
 }
 
-void Stegano::load10(const PngData& data, Machine& m)
+bool Stegano::load10(const PngData& data, Machine& m)
 {
   auto* d = data.data;
   size_t o = RAW_DATA_LENGTH + MAGIC_LENGTH;
@@ -203,7 +216,7 @@ void Stegano::load10(const PngData& data, Machine& m)
   /* skip 2 null*/
   o += 2;
 
-  compressedLength = std::min(size_t(32769ULL - RAW_DATA_LENGTH), compressedLength);
+  compressedLength = std::min(data.length - o, compressedLength);
 
   const std::string lookup = "\n 0123456789abcdefghijklmnopqrstuvwxyz!#%(){}[]<>+=/*:;.,~_";
   std::string code;
@@ -216,8 +229,13 @@ void Stegano::load10(const PngData& data, Machine& m)
     uint8_t v = assembleByte(d[o + i]);
 
     /* copy next */
+    if (v != 0x00 && v > 0x3b && i + 1 >= compressedLength)
+      return false;
+
     if (v == 0x00)
     {
+      if (i + 1 >= compressedLength)
+        break;
       uint8_t vn = assembleByte(d[o + i + 1]);
       code += vn;
       ++i;
@@ -234,6 +252,9 @@ void Stegano::load10(const PngData& data, Machine& m)
       auto offset = ((v - 0x3c) << 4) + (vn & 0xf);
       auto length = (vn >> 4) + 2;
 
+      if ((size_t)offset > code.length())
+        return false;
+
       const size_t start = code.length() - offset;
       for (size_t j = 0; j < length; ++j)
         code += code[start + j];
@@ -248,11 +269,37 @@ void Stegano::load10(const PngData& data, Machine& m)
   output.close();
 #endif
 
-  m.code().initFromSource(code);
+  return m.code().initFromSource(code);
 }
 
+/* without a compression header the code is plain text, ending at the first zero */
+bool Stegano::loadPlain(const PngData& data, Machine& m)
+{
+  std::string code;
+  for (size_t i = RAW_DATA_LENGTH; i < data.length && i < 0x8000; ++i)
+  {
+    const uint8_t v = assembleByte(data.data[i]);
+    if (v == 0)
+      break;
+    code += (char)v;
+  }
 
-void Stegano::load(const PngData& data, Machine& m)
+  return m.code().initFromSource(code);
+}
+
+bool Stegano::loadRom(const PngData& data, Machine& m)
+{
+  if (data.length != IMAGE_WIDTH * IMAGE_HEIGHT)
+    return false;
+
+  for (size_t i = 0; i < address::CART_DATA_LENGTH; ++i)
+    m.memory().base()[i] = assembleByte(data.data[i]);
+
+  m.memory().backupCartridge();
+  return true;
+}
+
+bool Stegano::load(const PngData& data, Machine& m)
 {
   constexpr size_t SPRITE_SHEET_SIZE = gfx::SPRITE_SHEET_HEIGHT * gfx::SPRITE_SHEET_WIDTH / gfx::PIXEL_TO_BYTE_RATIO;
   constexpr size_t TILE_MAP_SIZE = gfx::TILE_MAP_WIDTH * gfx::TILE_MAP_HEIGHT * sizeof(sprite_index_t) / 2;
@@ -266,13 +313,17 @@ void Stegano::load(const PngData& data, Machine& m)
 
   static_assert(RAW_DATA_LENGTH == SPRITE_SHEET_SIZE + TILE_MAP_SIZE + SPRITE_FLAGS_SIZE + MUSIC_SIZE + SOUND_SIZE, "Must be equal");
 #endif
-  assert(data.length == IMAGE_WIDTH * IMAGE_HEIGHT);
+  if (data.length != IMAGE_WIDTH * IMAGE_HEIGHT)
+    return false;
 
   auto* d = data.data;
 
   /* first 0x4300 are read directly into the cart */
   for (size_t i = 0; i < RAW_DATA_LENGTH; ++i)
     m.memory().base()[i] = assembleByte(d[i]);
+
+  /* reload() restores the cart as it was before any of its code ran */
+  m.memory().backupCartridge();
 
   size_t o = RAW_DATA_LENGTH;
   std::array<uint8_t, MAGIC_LENGTH> magic;
@@ -287,11 +338,10 @@ void Stegano::load(const PngData& data, Machine& m)
 
   /* use different algorithms according to cartridge version */
   if (magic == expected)
-    load10(data, m);
-  else if (magic == expected2)
-    load20(data, m);
-  else
-    assert(false);
+    return load10(data, m);
+  if (magic == expected2)
+    return load20(data, m);
+  return loadPlain(data, m);
 
 
 }

@@ -40,20 +40,26 @@ namespace retro8
 
     inline void InputManager::reset()
     {
+      _frameCounter = 0;
       for (auto& pks : keyStatus)
       {
         for (uint32_t i = 0; i < pks.size(); ++i)
         {
           pks[i].button = retro8::button_t(1 << i);
           pks[i].state = KeyStatus::State::OFF;
+          pks[i].ticks = 0;
         }
       }
     }
 
     inline void InputManager::manageKeyRepeat()
     {
-      static constexpr uint32_t TICKS_FOR_FIRST_REPEAT = 15;
-      static constexpr uint32_t TICKS_REPEATING = 4;
+      /* PICO-8 repeats after 15 frames and then every 4 at 30 fps, carts can change both through 0x5f5c and 0x5f5d, and 255 at
+       * 0x5f5c stops the repeat; ticks come at 60 Hz so each frame is two ticks */
+      const uint8_t* hw = _machine->memory().base();
+      const bool repeats = hw[0x5f5c] != 255;
+      const uint32_t TICKS_FOR_FIRST_REPEAT = 2 * (hw[0x5f5c] ? hw[0x5f5c] : 15);
+      const uint32_t TICKS_REPEATING = 2 * (hw[0x5f5d] ? hw[0x5f5d] : 4);
 
       /* manage key repeats */
       const uint32_t ticks = _frameCounter;
@@ -69,13 +75,13 @@ namespace retro8
             _machine->state().previousButtons[i].set(ks.button);
             ks.state = KeyStatus::State::WAITING;
           }
-          else if (ks.state == KeyStatus::State::WAITING && (ticks - ks.ticks) >= TICKS_FOR_FIRST_REPEAT)
+          else if (ks.state == KeyStatus::State::WAITING && repeats && (ticks - ks.ticks) >= TICKS_FOR_FIRST_REPEAT)
           {
             _machine->state().previousButtons[i].set(ks.button);
             ks.state = KeyStatus::State::REPEATING;
             ks.ticks = ticks;
           }
-          else if (ks.state == KeyStatus::State::REPEATING && (ticks - ks.ticks) >= TICKS_REPEATING)
+          else if (ks.state == KeyStatus::State::REPEATING && repeats && (ticks - ks.ticks) >= TICKS_REPEATING)
           {
             _machine->state().previousButtons[i].set(ks.button);
             ks.ticks = ticks;

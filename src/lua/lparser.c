@@ -306,6 +306,24 @@ static void singlevar (LexState *ls, expdesc *var) {
 }
 
 
+static void singlevar_ts (LexState *ls, expdesc *var, TString *varname) {
+  FuncState *fs = ls->fs;
+  singlevaraux(fs, varname, var, 1);
+  if (var->k == VVOID) {  /* global name? */
+    expdesc key;
+    singlevaraux(fs, ls->envn, var, 1);  /* get environment variable */
+    lua_assert(var->k != VVOID);  /* this one must exist */
+    codestring(ls, &key, varname);  /* key is variable name */
+    luaK_indexed(fs, var, &key);  /* env[varname] */
+  }
+}
+
+
+static void singlevar_str (LexState *ls, expdesc *var, const char *name) {
+  singlevar_ts(ls, var, luaX_newstring(ls, name, strlen(name)));
+}
+
+
 static void adjust_assign (LexState *ls, int nvars, int nexps, expdesc *e) {
   FuncState *fs = ls->fs;
   int extra = nvars - nexps;
@@ -794,8 +812,14 @@ static void body (LexState *ls, expdesc *e, int ismethod, int line) {
     adjustlocalvars(ls, 1);
   }
   parlist(ls);
-  checknext(ls, ')');
-  statlist(ls);
+  {
+    int keepnewline = ls->ignorenewline;
+    ls->ignorenewline = 1;
+    checknext(ls, ')');
+    while (testnext(ls, TK_EOL));
+    statlist(ls);
+    ls->ignorenewline = keepnewline;
+  }
   new_fs.f->lastlinedefined = ls->linenumber;
   check_match(ls, TK_END, TK_FUNCTION, line);
   codeclosure(ls, e);
@@ -1014,6 +1038,9 @@ static BinOpr getbinopr (int op) {
     case TK_NE: return OPR_NE;
     case TK_NE2: return OPR_NE;
     case TK_EQ: return OPR_EQ;
+    case TK_LSHR: return OPR_LSHR;
+    case TK_ROTL: return OPR_ROTL;
+    case TK_ROTR: return OPR_ROTR;
     case '<': return OPR_LT;
     case TK_LE: return OPR_LE;
     case '>': return OPR_GT;
@@ -1038,7 +1065,8 @@ static const struct {
    {9, 8},                   /* '..' (right associative) */
    {3, 3}, {3, 3}, {3, 3},   /* ==, <, <= */
    {3, 3}, {3, 3}, {3, 3},   /* ~=, >, >= */
-   {2, 2}, {1, 1}            /* and, or */
+   {2, 2}, {1, 1},           /* and, or */
+   {7, 7}, {7, 7}, {7, 7}    /* '>>>' '<<>' '>><' */
 };
 
 #define UNARY_PRIORITY	12  /* priority for unary operators */
@@ -1048,12 +1076,67 @@ static const struct {
 ** subexpr -> (simpleexp | unop subexpr) { binop subexpr }
 ** where 'binop' is any binary operator with a priority higher than 'limit'
 */
+static BinOpr subexpr (LexState *ls, expdesc *v, int limit);
+
+
+/* PICO-8 '@a', '%a' and '$a' read memory through peek, peek2 and peek4 */
+static void peekexp (LexState *ls, expdesc *v, const char *name) {
+  FuncState *fs = ls->fs;
+  expdesc arg;
+  int base;
+  int line = ls->linenumber;
+  luaX_next(ls);
+  singlevar_str(ls, v, name);
+  luaK_exp2nextreg(fs, v);
+  base = v->u.info;
+  subexpr(ls, &arg, UNARY_PRIORITY);
+  luaK_exp2nextreg(fs, &arg);
+  init_exp(v, VCALL, luaK_codeABC(fs, OP_CALL, base, 2, 2));
+  luaK_fixline(fs, line);
+  fs->freereg = base + 1;
+}
+
+
+/* PICO-8 '>>>', '<<>' and '>><' call lshr, rotl and rotr */
+static BinOpr callbinexp (LexState *ls, expdesc *v, BinOpr op, int full) {
+  static const char *const names[] = {"lshr", "rotl", "rotr"};
+  FuncState *fs = ls->fs;
+  expdesc fn, v2;
+  BinOpr nextop;
+  int base;
+  int line = ls->linenumber;
+  luaX_next(ls);
+  luaK_exp2nextreg(fs, v);
+  base = v->u.info;
+  singlevar_str(ls, &fn, names[op - OPR_LSHR]);
+  luaK_exp2nextreg(fs, &fn);
+  luaK_codeABC(fs, OP_MOVE, fs->freereg, base, 0);
+  luaK_reserveregs(fs, 1);
+  if (full) {
+    expr(ls, &v2);
+    nextop = OPR_NOBINOPR;
+  }
+  else
+    nextop = subexpr(ls, &v2, priority[op].right);
+  luaK_exp2nextreg(fs, &v2);
+  luaK_codeABC(fs, OP_CALL, base + 1, 3, 2);
+  luaK_fixline(fs, line);
+  luaK_codeABC(fs, OP_MOVE, base, base + 1, 0);
+  fs->freereg = base + 1;
+  init_exp(v, VNONRELOC, base);
+  return nextop;
+}
+
+
 static BinOpr subexpr (LexState *ls, expdesc *v, int limit) {
   BinOpr op;
   UnOpr uop;
   enterlevel(ls);
   uop = getunopr(ls->t.token);
-  if (uop != OPR_NOUNOPR) {
+  if (ls->t.token == '@') peekexp(ls, v, "peek");
+  else if (ls->t.token == '%') peekexp(ls, v, "peek2");
+  else if (ls->t.token == '$') peekexp(ls, v, "peek4");
+  else if (uop != OPR_NOUNOPR) {
     int line = ls->linenumber;
     luaX_next(ls);
     subexpr(ls, v, UNARY_PRIORITY);
@@ -1066,6 +1149,10 @@ static BinOpr subexpr (LexState *ls, expdesc *v, int limit) {
     expdesc v2;
     BinOpr nextop;
     int line = ls->linenumber;
+    if (op >= OPR_LSHR) {
+      op = callbinexp(ls, v, op, 0);
+      continue;
+    }
     luaX_next(ls);
     luaK_infix(ls->fs, op, v);
     /* read sub-expression with higher priority */
@@ -1093,13 +1180,23 @@ static void expr (LexState *ls, expdesc *v) {
 */
 
 
-static void block (LexState *ls) {
-  /* block -> statlist */
+static void inline_block (LexState *ls) {
+  /* block -> statlist, keeping the current newline handling */
   FuncState *fs = ls->fs;
   BlockCnt bl;
   enterblock(fs, &bl, 0);
   statlist(ls);
   leaveblock(fs);
+}
+
+
+static void block (LexState *ls) {
+  /* block -> statlist, where newlines never end an enclosing short if */
+  int keepnewline = ls->ignorenewline;
+  ls->ignorenewline = 1;
+  while (testnext(ls, TK_EOL));
+  inline_block(ls);
+  ls->ignorenewline = keepnewline;
 }
 
 
@@ -1159,6 +1256,24 @@ static BinOpr op_for_compound_assign(Token r)
     return OPR_SUB;
   case TK_ASSMOD:
     return OPR_MOD;
+  case TK_ASSIDIV:
+    return OPR_IDIV;
+  case TK_ASSCONCAT:
+    return OPR_CONCAT;
+  case TK_ASSPOW:
+    return OPR_POW;
+  case TK_ASSBAND:
+    return OPR_BAND;
+  case TK_ASSBOR:
+    return OPR_BOR;
+  case TK_ASSBXOR:
+    return OPR_BXOR;
+  case TK_ASSSHL:
+    return OPR_SHL;
+  case TK_ASSSHR:
+    return OPR_SHR;
+  case TK_ASSLSHR:
+    return OPR_LSHR;
   default:
     return OPR_NOBINOPR;
   }
@@ -1214,6 +1329,12 @@ static void compound_assign_op(LexState *ls, expdesc *v) {
   expdesc e = *v, v2;
   BinOpr op = op_for_compound_assign(ls->t);
   luaK_reserveregs(fs, fs->freereg - fs->nactvar); /* reserve all registers needed by the lvalue */
+  if (op >= OPR_LSHR) {  /* '>>>=' is a call */
+    callbinexp(ls, &e, op, 1);
+    luaK_setoneret(ls->fs, &e);
+    luaK_storevar(ls->fs, v, &e);
+    return;
+  }
   luaX_next(ls);
   line = ls->linenumber;
   enterlevel(ls);
@@ -1297,10 +1418,24 @@ static void whilestat (LexState *ls, int line) {
   int whileinit;
   int condexit;
   BlockCnt bl;
+  int maybeInline;
   luaX_next(ls);  /* skip WHILE */
+  maybeInline = ls->t.token == '(';
   whileinit = luaK_getlabel(fs);
   condexit = cond(ls);
   enterblock(fs, &bl, 1);
+  if (maybeInline && ls->t.token != TK_DO) {  /* PICO-8 'while (cond) stat' */
+    int keepnewline = ls->ignorenewline;
+    ls->ignorenewline = 0;
+    inline_block(ls);
+    luaK_jumpto(fs, whileinit);
+    leaveblock(fs);
+    luaK_patchtohere(fs, condexit);
+    ls->ignorenewline = keepnewline;
+    if (keepnewline)
+      while (testnext(ls, TK_EOL));
+    return;
+  }
   checknext(ls, TK_DO);
   block(ls);
   luaK_jumpto(fs, whileinit);
@@ -1460,20 +1595,26 @@ static void inline_if(LexState* ls, expdesc* v)
     jf = v->f;
   }
 
-  ls->ignorenewline = 0;
-  statlist(ls);  /* parse true block */
-
-  leaveblock(fs);
-
-  luaK_patchtohere(fs, jf);
-
-  if (testnext(ls, TK_ELSE))
   {
-    block(ls);  /* 'else' part */
-  }
+    int keepnewline = ls->ignorenewline;
+    int escape = NO_JUMP;
+    ls->ignorenewline = 0;
+    statlist(ls);  /* parse true block */
 
-  ls->ignorenewline = 1;
-  while (testnext(ls, TK_EOL));
+    leaveblock(fs);
+
+    if (ls->t.token == TK_ELSE)  /* the true block must jump over 'else' */
+      escape = luaK_jump(fs);
+    luaK_patchtohere(fs, jf);
+
+    if (testnext(ls, TK_ELSE))
+      inline_block(ls);  /* 'else' part, on the same line */
+    luaK_patchtohere(fs, escape);
+
+    ls->ignorenewline = keepnewline;
+    if (keepnewline)
+      while (testnext(ls, TK_EOL));
+  }
 }
 
 static int test_then_block (LexState *ls, int *escapelist) {
@@ -1489,7 +1630,7 @@ static int test_then_block (LexState *ls, int *escapelist) {
   expr(ls, &v);  /* read condition */
 
   /* if we had parenthesis and there is no then, it's an inline */
-  maybeInline = maybeInline && ls->t.token != TK_THEN;
+  maybeInline = maybeInline && ls->t.token != TK_THEN && ls->t.token != TK_DO;
 
   if (maybeInline) /* surely inline inline, consume ')' */
   {
@@ -1497,7 +1638,9 @@ static int test_then_block (LexState *ls, int *escapelist) {
     return 1;
   }
 
-  checknext(ls, TK_THEN);
+  /* PICO-8 also takes 'do' in place of 'then' */
+  if (!testnext(ls, TK_DO))
+    checknext(ls, TK_THEN);
   if (ls->t.token == TK_GOTO || ls->t.token == TK_BREAK) {
     luaK_goiffalse(ls->fs, &v);  /* will jump to label if condition is true */
     enterblock(fs, &bl, 0);  /* must enter block before 'goto' */
@@ -1515,7 +1658,13 @@ static int test_then_block (LexState *ls, int *escapelist) {
     enterblock(fs, &bl, 0);
     jf = v.f;
   }
-  statlist(ls);  /* 'then' part */
+  {
+    int keepnewline = ls->ignorenewline;
+    ls->ignorenewline = 1;
+    while (testnext(ls, TK_EOL));
+    statlist(ls);  /* 'then' part */
+    ls->ignorenewline = keepnewline;
+  }
   leaveblock(fs);
   if (ls->t.token == TK_ELSE ||
       ls->t.token == TK_ELSEIF)  /* followed by 'else'/'elseif'? */
@@ -1558,12 +1707,26 @@ static void localstat (LexState *ls) {
   int nvars = 0;
   int nexps;
   expdesc e;
+  TString *name = NULL;
+  BinOpr op;
   do {
-    new_localvar(ls, str_checkname(ls));
+    name = str_checkname(ls);
+    new_localvar(ls, name);
     nvars++;
   } while (testnext(ls, ','));
+  op = op_for_compound_assign(ls->t);
   if (testnext(ls, '='))
     nexps = explist(ls, &e);
+  else if (nvars == 1 && op != OPR_NOBINOPR && op < OPR_LSHR) {  /* PICO-8 'local x += y' */
+    expdesc v2;
+    int line = ls->linenumber;
+    singlevar_ts(ls, &e, name);  /* the outer 'x', the new local is not active yet */
+    luaX_next(ls);
+    luaK_infix(ls->fs, op, &e);
+    expr(ls, &v2);
+    luaK_posfix(ls->fs, op, &e, &v2, line);
+    nexps = 1;
+  }
   else {
     e.k = VVOID;
     nexps = 0;
@@ -1660,6 +1823,37 @@ static void statement (LexState *ls) {
   switch (ls->t.token) {
     case ';': {  /* stat -> ';' (empty statement) */
       luaX_next(ls);  /* skip ';' */
+      break;
+    }
+    case '?': {  /* stat -> PICO-8 print shorthand, runs to the end of the line */
+      FuncState *fs = ls->fs;
+      expdesc fn, args;
+      int base, nparams;
+      int keepnewline = ls->ignorenewline;
+      ls->ignorenewline = 0;
+      luaX_next(ls);
+      singlevar_str(ls, &fn, "print");
+      luaK_exp2nextreg(fs, &fn);
+      base = fn.u.info;
+      if (block_follow(ls, 1) || ls->t.token == ';')
+        args.k = VVOID;
+      else {
+        explist(ls, &args);
+        luaK_setmultret(fs, &args);
+      }
+      if (hasmultret(args.k))
+        nparams = LUA_MULTRET;
+      else {
+        if (args.k != VVOID)
+          luaK_exp2nextreg(fs, &args);
+        nparams = fs->freereg - (base + 1);
+      }
+      luaK_codeABC(fs, OP_CALL, base, nparams + 1, 1);
+      luaK_fixline(fs, line);
+      fs->freereg = base;
+      ls->ignorenewline = keepnewline;
+      if (keepnewline)
+        while (testnext(ls, TK_EOL));
       break;
     }
     case TK_IF: {  /* stat -> ifstat */

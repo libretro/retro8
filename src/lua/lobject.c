@@ -15,6 +15,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "lua.h"
@@ -120,18 +121,93 @@ static lua_Number numarith (lua_State *L, int op, lua_Number v1,
 }
 
 
+/*
+** PICO-8 numbers are 16.16 fixed point, so its bitwise operators work on
+** those 32 bits: '3 >> 1' is 1.5 and '-1 >> 1' is -0.5.
+*/
+static int p8_tofix (const TValue *o, int32_t *out) {
+  lua_Number n;
+  if (ttisinteger(o)) {
+    *out = (int32_t)(uint32_t)((lua_Unsigned)ivalue(o) << 16);
+    return 1;
+  }
+  if (tonumber(o, &n)) {
+    *out = (int32_t)(uint32_t)(int64_t)floor((double)n * 65536.0);
+    return 1;
+  }
+  return 0;
+}
+
+
+static void p8_setfix (TValue *res, int32_t v) {
+  if ((v & 0xffff) == 0) {
+    setivalue(res, (lua_Integer)(v >> 16));
+  }
+  else {
+    setfltvalue(res, cast_num((double)v / 65536.0));
+  }
+}
+
+
+int luaO_p8bitwise (int op, const TValue *p1, const TValue *p2, TValue *res) {
+  int32_t a, b;
+  uint32_t ua;
+  int n;
+  if (!p8_tofix(p1, &a) || !p8_tofix(p2, &b))
+    return 0;
+  n = b >> 16;  /* shift amounts use the integer part */
+  ua = (uint32_t)a;
+  switch (op) {
+    case LUA_OPBAND: a = a & b; break;
+    case LUA_OPBOR: a = a | b; break;
+    case LUA_OPBXOR: a = a ^ b; break;
+    case LUA_OPBNOT: a = ~a; break;
+    case LUA_OPSHL:
+      if (n >= 32 || n <= -32) a = 0;
+      else if (n >= 0) a = (int32_t)(ua << n);
+      else a = a >> -n;
+      break;
+    case LUA_OPSHR:
+      if (n >= 32) a = a < 0 ? -1 : 0;
+      else if (n <= -32) a = 0;
+      else if (n >= 0) a = a >> n;
+      else a = (int32_t)(ua << -n);
+      break;
+    case LUA_OPLSHR:
+      if (n >= 32 || n <= -32) a = 0;
+      else if (n >= 0) a = (int32_t)(ua >> n);
+      else a = (int32_t)(ua << -n);
+      break;
+    case LUA_OPROTL:
+      n &= 31;
+      a = (int32_t)(n ? (ua << n) | (ua >> (32 - n)) : ua);
+      break;
+    case LUA_OPROTR:
+      n &= 31;
+      a = (int32_t)(n ? (ua >> n) | (ua << (32 - n)) : ua);
+      break;
+    default: return 0;
+  }
+  p8_setfix(res, a);
+  return 1;
+}
+
+
 void luaO_arith (lua_State *L, int op, const TValue *p1, const TValue *p2,
                  TValue *res) {
   switch (op) {
     case LUA_OPBAND: case LUA_OPBOR: case LUA_OPBXOR:
     case LUA_OPSHL: case LUA_OPSHR:
-    case LUA_OPBNOT: {  /* operate only on integers */
-      lua_Integer i1; lua_Integer i2;
-      if (tointeger(p1, &i1) && tointeger(p2, &i2)) {
-        setivalue(res, intarith(L, op, i1, i2));
+    case LUA_OPBNOT: {  /* PICO-8 fixed point bits */
+      if (luaO_p8bitwise(op, p1, p2, res))
         return;
-      }
       else break;  /* go to the end */
+    }
+    case LUA_OPLSHR: case LUA_OPROTL: case LUA_OPROTR: {
+      if (luaO_p8bitwise(op, p1, p2, res))
+        return;
+      luaG_runerror(L, "attempt to perform bitwise operation on a non-number value");
+      return;
     }
     case LUA_OPDIV: case LUA_OPPOW: {  /* operate only on floats */
       lua_Number n1; lua_Number n2;
@@ -244,8 +320,10 @@ static lua_Number lua_strx2number (const char *s, char **endptr) {
 
 lua_Number lua_strb2number(const char* s, char** endptr)
 {
-  if (s[0] != '0' || (s[1] != 'b' && s[1] != 'B'))
+  if (s[0] != '0' || (s[1] != 'b' && s[1] != 'B')) {
+    *endptr = (char*)s;  /* not binary, so nothing was recognised */
     return 0.0f;
+  }
 
   s += 2;
 
@@ -426,13 +504,23 @@ void luaO_tostring (lua_State *L, StkId obj) {
   if (ttisinteger(obj))
     len = lua_integer2str(buff, sizeof(buff), ivalue(obj));
   else {
-    len = lua_number2str(buff, sizeof(buff), fltvalue(obj));
-#if !defined(LUA_COMPAT_FLOATSTRING)
-    if (buff[strspn(buff, "-0123456789")] == '\0') {  /* looks like an int? */
-      buff[len++] = lua_getlocaledecpoint();
-      buff[len++] = '0';  /* adds '.0' to result */
+    /* PICO-8 shows whole numbers bare and fractions to at most 4 places */
+    const double n = (double)fltvalue(obj);
+    if (n != n || n - n != 0)
+      len = lua_number2str(buff, sizeof(buff), fltvalue(obj));
+    else if (n == floor(n) && n > -2147483648.0 && n < 2147483648.0)
+      len = snprintf(buff, sizeof(buff), "%d", (int)n);
+    else {
+      /* four places rounded from the 16 fraction bits, held at .9999 so 0x7fff.ffff never shows as 32768 */
+      const long long bits = (long long)floor(fabs(n) * 65536.0);
+      long long digits = ((bits & 0xffff) * 10000 + 32768) >> 16;
+      if (digits > 9999) digits = 9999;
+      len = snprintf(buff, sizeof(buff), "%s%lld.%04lld", n < 0 ? "-" : "", bits >> 16, digits);
+      while (len > 0 && buff[len - 1] == '0') len--;
+      if (len > 0 && buff[len - 1] == '.') len--;
+      buff[len] = '\0';
+      if (strcmp(buff, "-0") == 0) { buff[0] = '0'; buff[1] = '\0'; len = 1; }
     }
-#endif
   }
   setsvalue2s(L, obj, luaS_newlstr(L, buff, len));
 }

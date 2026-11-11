@@ -496,3 +496,42 @@ LUAMOD_API int luaopen_base (lua_State *L) {
   return 1;
 }
 
+
+void eris_permbaselib(lua_State *L, int forUnpersist) {
+  luaL_checktype(L, -1, LUA_TTABLE);
+  luaL_checkstack(L, 2, NULL);
+
+  /* NOTE: This is a terrible, terrible hack. We push a continuation function
+   * as a normal C function. We kinda have to, though, to allow proper lookup
+   * in the ref table, and it is never ever called, so we get away with it. */
+  if (forUnpersist) {
+    lua_pushstring(L, "__eris.baselib_finishpcall");
+    lua_pushcfunction(L, (lua_CFunction)(void (*) (void))finishpcall);
+  }
+  else {
+    lua_pushcfunction(L, (lua_CFunction)(void (*) (void))finishpcall);
+    lua_pushstring(L, "__eris.baselib_finishpcall");
+  }
+  lua_rawset(L, -3);
+
+  if (forUnpersist) {
+    lua_pushstring(L, "__eris.baselib_luaB_next");
+    lua_pushcfunction(L, luaB_next);
+  }
+  else {
+    lua_pushcfunction(L, luaB_next);
+    lua_pushstring(L, "__eris.baselib_luaB_next");
+  }
+  lua_rawset(L, -3);
+
+  if (forUnpersist) {
+    lua_pushstring(L, "__eris.baselib_ipairsaux");
+    lua_pushcfunction(L, ipairsaux);
+  }
+  else {
+    lua_pushcfunction(L, ipairsaux);
+    lua_pushstring(L, "__eris.baselib_ipairsaux");
+  }
+  lua_rawset(L, -3);
+}
+

@@ -51,7 +51,7 @@ namespace retro8
       using pixel_t = uint32_t;
 
     private:
-      std::array<pixel_t, COLOR_COUNT> table;
+      std::array<pixel_t, COLOR_COUNT * 2> table;
 
     public:
       template<typename B>
@@ -59,17 +59,23 @@ namespace retro8
       {
         struct rgb_color_t { uint8_t r, g, b; };
 
-        constexpr std::array<rgb_color_t, COLOR_COUNT> colors = { {
+        /* the standard colours, then the secret ones that the screen palette selects as 128 to 143 */
+        constexpr std::array<rgb_color_t, COLOR_COUNT * 2> colors = { {
           {  0,   0,   0}, { 29,  43,  83}, {126,  37,  83}, {  0, 135,  81},
           {171,  82,  54}, { 95,  87,  79}, {194, 195, 199}, {255, 241, 232},
           {255,   0,  77}, {255, 163,   0}, {255, 236,  39}, {  0, 228,  54},
-          { 41, 173, 255}, {131, 118, 156}, {255, 119, 168}, {255, 204, 170}
+          { 41, 173, 255}, {131, 118, 156}, {255, 119, 168}, {255, 204, 170},
+          { 41,  24,  20}, { 17,  29,  53}, { 66,  33,  54}, { 18,  83,  89},
+          {116,  47,  41}, { 73,  51,  59}, {162, 136, 121}, {243, 239, 125},
+          {190,  18,  80}, {255, 108,  36}, {168, 231,  46}, {  0, 181,  67},
+          {  6,  90, 181}, {117,  70, 101}, {255, 110,  89}, {255, 157, 129}
         } };
 
-        for (size_t i = 0; i < COLOR_COUNT; ++i)
+        for (size_t i = 0; i < COLOR_COUNT * 2; ++i)
           table[i] = mapper(colors[i].r, colors[i].g, colors[i].b);
       }
-      pixel_t get(color_t c) const { return table[c]; }
+      pixel_t get(color_t c) const { return table[size_t(c)]; }
+      pixel_t get(uint8_t c) const { return table[c]; }
     };
 
     
@@ -148,6 +154,12 @@ namespace retro8
         transparent(color_t::BLACK, true);
       }
 
+      void resetScreen()
+      {
+        for (size_t i = 0; i < COLOR_COUNT; ++i)
+          colors[i] = uint8_t(i);
+      }
+
       void resetTransparency()
       {
         transparent(color_t::BLACK, true);
@@ -158,6 +170,10 @@ namespace retro8
 
       //TODO: %16 to make it wrap around, is it intended behavior? mandel.
       color_t get(color_t i) const { return color_t(colors[i] & 0x0F); }
+      /* a screen palette entry with bit 7 set shows a secret colour, found at 16 to 31 of the colour table */
+      uint8_t screen(color_t i) const { return (colors[i] & 0x0F) | ((colors[i] & 0x80) >> 3); }
+      void setScreen(color_t i, uint8_t value) { colors[i] = value & 0x8F; }
+      uint8_t raw(color_t i) const { return colors[i]; }
       void set(color_t i, color_t color) { colors[i] = color | (colors[i] & 0x10); }
       color_t operator[](color_t i) { return get(i); }
       bool transparent(color_t i) const { return (colors[i] & 0x10) != 0; }
@@ -171,7 +187,7 @@ namespace retro8
       uint8_t x1;
       uint8_t y1;
 
-      void reset() { x0 = y0 = 0; x1 = SCREEN_WIDTH - 1; y1 = SCREEN_HEIGHT - 1; }
+      void reset() { x0 = y0 = 0; x1 = SCREEN_WIDTH; y1 = SCREEN_HEIGHT; }
       void set(uint8_t xs, uint8_t ys, uint8_t xe, uint8_t ye) { x0 = xs; y0 = ys; x1 = xe; y1 = ye; }
     };
 
