@@ -1392,10 +1392,17 @@ namespace platform
     {
       const std::time_t now = std::time(nullptr);
       std::tm parts = {};
+#ifdef _WIN32
+      if (n <= 85)
+        gmtime_s(&parts, &now);
+      else
+        localtime_s(&parts, &now);
+#else
       if (n <= 85)
         gmtime_r(&now, &parts);
       else
         localtime_r(&now, &parts);
+#endif
       const int values[] = { parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday, parts.tm_hour, parts.tm_min, parts.tm_sec };
       lua_pushinteger(L, values[(n - 80) % 10]);
       return 1;

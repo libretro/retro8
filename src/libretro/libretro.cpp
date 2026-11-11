@@ -1,4 +1,7 @@
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 #include "libretro.h"
 
 #include "common.h"
@@ -778,7 +781,11 @@ extern "C"
     if (env.retro_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &saveDirectory) && saveDirectory && *saveDirectory)
     {
       lua::cartdataDirectory = std::string(saveDirectory) + "/retro8";
+#ifdef _WIN32
+      _mkdir(lua::cartdataDirectory.c_str());
+#else
       mkdir(lua::cartdataDirectory.c_str(), 0755);
+#endif
     }
 
     if (info && info->data)
