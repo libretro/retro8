@@ -312,7 +312,7 @@ void APU::playSound(sound_index_t index, channel_index_t channel, int32_t start,
 
   Channel& c = sfxChannels[channel];
   ghostChannel(c);
-  c.voice.start(index, std::max(0, start), length > 0 ? length : -1);
+  c.voice.start(index, std::max<int32_t>(0, start), length > 0 ? length : -1);
   c.instrument.stop();
   c.started = ++starts;
 }
@@ -713,7 +713,7 @@ float APU::renderChannel(Channel& c, channel_index_t index)
 
   /* reverb echoes the channel two or four ticks later, as zepto8 measured */
   int32_t reverb = flags.reverb();
-  if (control(1) & bit) reverb = std::max(reverb, 1);
+  if (control(1) & bit) reverb = std::max<int32_t>(reverb, 1);
   if (control(1) & strong) reverb = 2;
   if (reverb)
   {
@@ -728,7 +728,7 @@ float APU::renderChannel(Channel& c, channel_index_t index)
 
   /* both shelves run all the time so switching dampen on mid sound starts from a settled state */
   int32_t dampen = flags.dampen();
-  if (control(3) & bit) dampen = std::max(dampen, 1);
+  if (control(3) & bit) dampen = std::max<int32_t>(dampen, 1);
   if (control(3) & strong) dampen = 2;
   const float light = dampLight.run(c.dampLight, out);
   const float strongOut = dampStrong.run(c.dampStrong, out);
