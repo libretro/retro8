@@ -29,7 +29,11 @@ THE SOFTWARE.
 #include <string.h>
 
 /* Not using stdbool because Visual Studio lives in the past... */
-#ifndef __cplusplus
+#if defined(__cplusplus) || (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L)
+/* bool, true and false are keywords */
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#include <stdbool.h>
+#else
 typedef int bool;
 #define false 0
 #define true 1
