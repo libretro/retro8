@@ -983,7 +983,7 @@ namespace sound
     if (index >= (sfx::sound_index_t)sfx::SOUND_COUNT)
       return 0;
 
-    const int32_t start = std::max(0, lua_isnumber(L, 3) ? (int32_t)lua_tonumber(L, 3) : 0);
+    const int32_t start = std::max<int32_t>(0, lua_isnumber(L, 3) ? (int32_t)lua_tonumber(L, 3) : 0);
     const int32_t length = lua_isnumber(L, 4) ? (int32_t)lua_tonumber(L, 4) : -1;
 
     machine->sound().play(index, channel, start, length);
@@ -1236,7 +1236,7 @@ namespace platform
   {
     const int32_t addr = address_at(L, 1);
     const uint8_t value = (uint8_t)int_at(L, 2);
-    const int32_t length = std::max(0, std::min(int_at(L, 3), MEMORY_SIZE));
+    const int32_t length = std::max<int32_t>(0, std::min<int32_t>(int_at(L, 3), MEMORY_SIZE));
 
     if (length > 0 && machine->memory().identityMapping() && addr + length <= MEMORY_SIZE)
       std::memset(mem() + addr, value, length);
@@ -1251,7 +1251,7 @@ namespace platform
   {
     const int32_t dest = address_at(L, 1);
     const int32_t src = address_at(L, 2);
-    const int32_t length = std::max(0, std::min(int_at(L, 3), MEMORY_SIZE));
+    const int32_t length = std::max<int32_t>(0, std::min<int32_t>(int_at(L, 3), MEMORY_SIZE));
 
     if (length > 0 && machine->memory().identityMapping() && dest + length <= MEMORY_SIZE && src + length <= MEMORY_SIZE)
       std::memmove(mem() + dest, mem() + src, length);
