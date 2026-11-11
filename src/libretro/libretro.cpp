@@ -810,6 +810,11 @@ extern "C"
 
       env.logger(RETRO_LOG_INFO, "[retro8] Loading %s\n", info->path);
 
+#if SOUND_ENABLED
+      /* before the cart runs: music() from its top level code or _init() has to survive */
+      machine->sound().init();
+#endif
+
 
       if (std::memcmp(bdata, "\x89PNG", 4) == 0)
       {
@@ -857,10 +862,6 @@ extern "C"
           LIBRETRO_LOG("[retro8] _init() function completed execution.");
         //});
       }
-
-#if SOUND_ENABLED
-      machine->sound().init();
-#endif
 
       env.frameCounter = 0;
 
